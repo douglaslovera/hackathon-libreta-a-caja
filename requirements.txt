@@ -1,2 +1,2 @@
 openai>=3.0
-python-telegram-bot>=22.0
+python-telegram-bot[job-queue]>=22.0,<23
