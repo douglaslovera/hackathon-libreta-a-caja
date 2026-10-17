@@ -158,13 +158,17 @@ def main(argv: list[str] | None = None) -> None:
         import logging
 
         from canales.lote import procesar_csv
-        from core.memoria import Memoria
+        from core.memoria import abrir_memoria
 
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         Path("salidas").mkdir(exist_ok=True)
         salida = f"salidas/eval_{time.strftime('%H%M%S')}.csv"
         inicio = time.monotonic()
-        procesar_csv(args.mensajes, salida, memoria=Memoria(), tienda_id="eval")
+        memoria = abrir_memoria(":memory:")
+        try:
+            procesar_csv(args.mensajes, salida, memoria=memoria, tienda_id="eval")
+        finally:
+            memoria.close()
         print(f"\n{salida} en {time.monotonic() - inicio:.1f}s\n")
 
     evaluar(leer(args.esperado), leer(salida))

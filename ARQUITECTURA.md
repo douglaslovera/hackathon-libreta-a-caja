@@ -15,8 +15,10 @@ Never guess a price. When an amount is missing → row with empty monto and requ
   LLM call must be injectable/mockable so tests run offline).
 - Voice: OpenAI `gpt-4o-mini-transcribe`, `language="es"`, `prompt` = shop vocabulary.
 - Channel: Telegram via `python-telegram-bot` v22 (async, long polling). Env `TELEGRAM_TOKEN`.
-- Storage: SQLite (stdlib `sqlite3`), WAL mode, path env `DB_PATH` (default `./libreta.db`;
-  on Railway `/data/libreta.db` on a mounted Volume). Single replica.
+- Storage: Supabase Postgres via psycopg 3 / psycopg_pool, selected by `DATABASE_URL`.
+  SQLite (stdlib `sqlite3`, WAL) remains the offline/test fallback via `DB_PATH` (default `./libreta.db`).
+  Postgres pool: 1–5 connections, prepared statements disabled for pooler compatibility. Single replica
+  for Telegram polling; Railway needs no Volume when `DATABASE_URL` is configured.
 - Hosting: Railway.
 
 ## Layout and ownership
@@ -25,7 +27,9 @@ core/modelos.py      shared dataclasses (Accion, Transaccion, Deuda, Contexto, R
 core/procesar.py     procesar_mensaje(): glue  (lead)
 core/agente.py       interpretar(): LLM → list[Accion]           (agent A)
 core/prompt.py       system prompt (rule-based, general)          (agent A)
-core/memoria.py      Memoria: SQLite store                        (agent B)
+core/memoria.py      MemoriaSQLite, legacy Memoria alias, abrir_memoria factory
+core/memoria_pg.py   MemoriaPostgres (same interface)
+db/schema.sql       idempotent Postgres schema, applied on startup
 core/verificacion.py amount-traceability guard                    (agent B)
 core/ejecutor.py     ejecutar(): validate + apply actions         (agent B)
 core/finanzas.py     flujo_semanal(), cuota_sostenible()          (agent B)
@@ -45,7 +49,8 @@ def interpretar(texto: str, contexto: Contexto, *, cliente=None, modelo: str | N
 #   nothing at all; an explicit `ignorar` action is preferred for non-business messages.
 
 # core/memoria.py
-class Memoria:
+def abrir_memoria(url: str | None = None)  # explicit URL/path, DATABASE_URL, DB_PATH, ./libreta.db
+class MemoriaSQLite:  # Memoria alias preserved; MemoriaPostgres(dsn) implements the same methods
     def __init__(self, path: str = ":memory:") -> None
     def agregar(self, t: Transaccion) -> Transaccion              # sets t.id
     def actualizar(self, transaccion_id: int, **campos) -> Transaccion
@@ -55,7 +60,7 @@ class Memoria:
     def deudas_abiertas(self, tienda_id: str) -> list[Deuda]
     def registrar_cobro(self, tienda_id: str, deuda_transaccion_id: int, monto: float | None) -> None
     #   monto None = paid in full. Reduces pendiente; closes the debt at 0.
-    def buscar(self, tienda_id: str, texto: str, n: int = 5) -> list[Transaccion]   # FTS5 on producto/cliente
+    def buscar(self, tienda_id: str, texto: str, n: int = 5) -> list[Transaccion]   # producto/cliente: SQLite FTS5; Postgres tsvector + ILIKE
     def alias(self, tienda_id: str) -> dict[str, str]
     def guardar_alias(self, tienda_id: str, variante: str, canonico: str) -> None
     def pendiente(self, tienda_id: str) -> dict | None            # open follow-up question state
@@ -63,6 +68,11 @@ class Memoria:
     def log(self, tienda_id: str, id_mensaje: str, texto: str, salida_llm: str, resultado: Resultado) -> None
     def borrar_tienda(self, tienda_id: str) -> None
     def contexto(self, tienda_id: str, dia: str | None = None) -> Contexto
+    def fechar_semana(self, tienda_id: str, id_mensaje: str, semana: str) -> None  # keep first date
+    def semanas_mensaje(self, tienda_id: str) -> dict[str, str]
+    def recordar_chat(self, chat_id: int) -> None
+    def chats(self) -> list[int]
+    def close(self) -> None
 
 # core/ejecutor.py
 def ejecutar(acciones: list[Accion], texto: str, *, tienda_id: str, id_mensaje: str,
@@ -118,14 +128,16 @@ Columns exactly `id_mensaje,tipo,producto,cantidad,monto,requiere_confirmacion`;
 empty; cantidad integer when whole; SI/NO. Generated from the final DB state so corrections apply.
 
 ## Application service (`core/servicio.py`) — shared by every channel
-`Libreta(memoria, db_path=None, *, interpretar=None)` owns follow-up answers, week dating, reports and batch:
+`Libreta(memoria, *, interpretar=None)` (legacy positional `db_path` accepted and ignored for one release) owns follow-up answers, week dating, reports and batch:
 `registrar(texto, *, tienda_id, id_mensaje=None, dia=None) -> Resultado` (an open pending question turns the
 text into its answer), `registrar_audio(audio, nombre_archivo, *, tienda_id) -> (transcript, Resultado|None)`,
 `transcribir(...)`, `pendiente(tienda_id)`, `omitir_pendiente(tienda_id, transaccion_id=None) -> bool`,
 `transacciones(tienda_id, semana=None|"YYYY-MM-DD"|"all")`, `semanas(tienda_id)`, `flujo(tienda_id, semana=None)`,
 `cuota(tienda_id)` (adds `semanas: [{semana, flujo}]`), `deudas(tienda_id)`, `reiniciar(tienda_id)`,
 `lote(csv_bytes, *, prefijo) -> (csv_bytes, filas, flujo)`, `close()`.
-All methods are blocking (SQLite/OpenAI): async callers wrap them in `asyncio.to_thread`.
+Only Memoria touches databases, including week dates and the Telegram chat registry.
+`Libreta.close()` closes its Memoria. SQLite alone migrates the old `telegram_semanas` table once.
+All methods are blocking (database/OpenAI): async callers wrap them in `asyncio.to_thread`.
 Channels must not reimplement this logic. Telegram: `crear_aplicacion(token, libreta) -> Application`.
 
 ## HTTP API (`canales/api.py`, FastAPI) — for the Vercel frontend
@@ -158,4 +170,18 @@ Schemas: `Transaction {id, message_id, type, product, quantity, amount|null, nee
 
 Runtime: one process. `main.py` runs uvicorn on `$PORT` (default 8000) serving the API, and — when
 `TELEGRAM_TOKEN` is set — starts the Telegram bot's polling inside the same event loop (FastAPI lifespan),
-sharing one `Libreta`. Railway: one service, Volume at `/data`, public domain enabled, 1 replica.
+sharing one `Libreta`. Railway: one service, public domain enabled, 1 replica for Telegram polling.
+
+`abrir_memoria`: an explicit URL/path wins over `DATABASE_URL`, then `DB_PATH`, then `./libreta.db`.
+`postgres://` and `postgresql://` select Postgres; other values select SQLite. Batch defaults explicitly
+to `:memory:` regardless of production environment; `--db` opts into persistence. Evaluation stays in memory.
+
+Postgres startup reads `db/schema.sql` (included in Docker): seven `public.libreta_*` tables,
+`numeric(12,2)` amounts/quantities, identity bigint transaction/log IDs, timestamptz and jsonb.
+Search uses a generated `simple` tsvector / GIN index plus ILIKE fallback without extensions.
+Every table enables RLS with no policies, denying PostgREST anon access; the server uses the postgres
+role, which bypasses RLS. Multi-statement writes commit or roll back together. This creates the schema;
+it does not copy existing SQLite ledger rows to Postgres.
+
+Opt-in integration tests: `TEST_DATABASE_URL=... .venv/bin/pytest tests/test_memoria_pg.py -q`.
+Use a test database: tests apply the schema and use unique shop IDs, cleaning their rows afterwards.

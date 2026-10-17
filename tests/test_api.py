@@ -29,7 +29,6 @@ def libreta(monkeypatch):
     lib = servicio.Libreta(memoria, interpretar=interpretar)
     yield lib
     lib.close()
-    memoria._db.close()
 
 
 @pytest.fixture
@@ -198,3 +197,22 @@ def test_main_telegram_lifespan(tmp_path, monkeypatch):
         assert captured == [('fake', app.state.libreta)]
         assert events == [('initialize', {}), ('start', {}), ('poll', {'drop_pending_updates': False})]
     assert [name for name, _ in events] == ['initialize', 'start', 'poll', 'stop_poll', 'stop', 'shutdown']
+
+
+def test_main_database_url_selects_backend_and_closes(monkeypatch, tmp_path):
+    import main
+    from unittest.mock import Mock
+
+    memoria = Memoria()
+    close = Mock(wraps=memoria.close)
+    monkeypatch.setattr(memoria, 'close', close)
+    factory = Mock(return_value=memoria)
+    monkeypatch.setattr(main, 'abrir_memoria', factory)
+    monkeypatch.chdir(tmp_path)
+    url = 'postgresql://example.invalid/postgres'
+    app = main.build_app({'ALLOW_NO_AUTH': '1', 'DATABASE_URL': url, 'DB_PATH': 'ignored/ledger.db'})
+    with TestClient(app) as client:
+        assert client.get('/shops/t/summary').status_code == 200
+    factory.assert_called_once_with(url)
+    close.assert_called_once_with()
+    assert not (tmp_path / 'ignored').exists()

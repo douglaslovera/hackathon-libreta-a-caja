@@ -5,8 +5,6 @@ Channels only translate their transport (Telegram updates, HTTP requests) into c
 
 from __future__ import annotations
 
-import sqlite3
-import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,21 +40,9 @@ class Libreta:
     """One shop's notebook operations on top of Memoria, plus week dating of messages."""
 
     def __init__(self, memoria, db_path: str | None = None, *, interpretar=None):
+        # db_path is accepted and ignored for one compatibility release.
         self.memoria = memoria
         self.interpretar = interpretar
-        self._lock = threading.Lock()
-        self._db = sqlite3.connect(db_path or ":memory:", check_same_thread=False)
-        self._db.execute("PRAGMA busy_timeout=5000")
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS semanas_mensaje (
-                   tienda_id TEXT, id_mensaje TEXT, semana TEXT NOT NULL,
-                   PRIMARY KEY (tienda_id, id_mensaje))"""
-        )
-        # One-time carry-over from the bot's earlier week table.
-        if self._db.execute("SELECT 1 FROM sqlite_master WHERE name='telegram_semanas'").fetchone():
-            self._db.execute("INSERT OR IGNORE INTO semanas_mensaje SELECT tienda_id, id_mensaje, semana FROM telegram_semanas")
-        self._db.commit()
-
     # ---- recording -------------------------------------------------------------------------
 
     def registrar(self, texto: str, *, tienda_id: str, id_mensaje: str | None = None,
@@ -115,9 +101,7 @@ class Libreta:
 
     def semanas(self, tienda_id: str) -> dict[str, list[Transaccion]]:
         """Transactions grouped by week (Monday ISO date). Undated rows count as this week."""
-        with self._lock:
-            fechas = dict(self._db.execute(
-                "SELECT id_mensaje, semana FROM semanas_mensaje WHERE tienda_id=?", (tienda_id,)))
+        fechas = self.memoria.semanas_mensaje(tienda_id)
         grupos: dict[str, list[Transaccion]] = {}
         for t in self.memoria.transacciones(tienda_id):
             grupos.setdefault(fechas.get(t.id_mensaje, semana_actual()), []).append(t)
@@ -161,9 +145,6 @@ class Libreta:
 
     def reiniciar(self, tienda_id: str) -> None:
         self.memoria.borrar_tienda(tienda_id)
-        with self._lock:
-            self._db.execute("DELETE FROM semanas_mensaje WHERE tienda_id=?", (tienda_id,))
-            self._db.commit()
 
     def lote(self, contenido_csv: bytes, *, prefijo: str) -> tuple[bytes, list[Transaccion], dict]:
         """Run a messages CSV in a fresh shop; returns (submission CSV bytes, rows, flow)."""
@@ -179,10 +160,7 @@ class Libreta:
             return salida.read_bytes(), filas, flujo_semanal(filas)
 
     def _fechar(self, tienda_id: str, id_mensaje: str) -> None:
-        with self._lock:
-            self._db.execute("INSERT OR IGNORE INTO semanas_mensaje VALUES (?, ?, ?)",
-                             (tienda_id, id_mensaje, semana_actual()))
-            self._db.commit()
+        self.memoria.fechar_semana(tienda_id, id_mensaje, semana_actual())
 
     def close(self) -> None:
-        self._db.close()
+        self.memoria.close()

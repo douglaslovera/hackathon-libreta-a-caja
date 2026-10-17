@@ -52,3 +52,24 @@ def test_procesar_csv(tmp_path):
         ["E09", "venta", "atún", "3", "", "SI"],
         ["E12", "cobro_fiado", "aceite primor", "1", "11.00", "NO"],
     ]
+
+
+def test_main_defaults_to_memory_despite_database_url(monkeypatch, tmp_path):
+    import canales.lote as lote
+    import core.config
+    import core.memoria
+
+    monkeypatch.setattr(core.config, 'cargar_env', lambda: None)
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://must-not-connect/postgres')
+    monkeypatch.setattr(lote, 'procesar_csv', lambda *args, memoria, **kwargs: memoria.transacciones('t'))
+    original = core.memoria.abrir_memoria
+    destinos = []
+
+    def abrir(url):
+        destinos.append(url)
+        return original(':memory:')
+
+    monkeypatch.setattr(core.memoria, 'abrir_memoria', abrir)
+    lote.main(['in.csv', 'out.csv'])
+    lote.main(['in.csv', 'out.csv', '--db', 'postgresql://explicit/postgres'])
+    assert destinos == [':memory:', 'postgresql://explicit/postgres']

@@ -78,18 +78,22 @@ def main(argv: list[str] | None = None) -> None:
     from core.config import cargar_env
 
     cargar_env()
-    from core.memoria import Memoria
+    from core.memoria import abrir_memoria
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("entrada")
     p.add_argument("salida")
-    p.add_argument("--db", default=":memory:", help="SQLite path (default: in memory)")
+    p.add_argument("--db", default=":memory:", help="SQLite path or Postgres URL (default: in-memory SQLite)")
     p.add_argument("--tienda", default=f"lote:{int(time.time())}")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     inicio = time.monotonic()
-    filas = procesar_csv(args.entrada, args.salida, memoria=Memoria(args.db), tienda_id=args.tienda)
+    memoria = abrir_memoria(args.db)
+    try:
+        filas = procesar_csv(args.entrada, args.salida, memoria=memoria, tienda_id=args.tienda)
+    finally:
+        memoria.close()
     print(f"{len(filas)} filas → {args.salida} en {time.monotonic() - inicio:.1f}s")
 
 

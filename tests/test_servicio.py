@@ -25,7 +25,8 @@ def libreta(monkeypatch):
 
     lib = servicio.Libreta(Memoria(), interpretar=interpretar)
     lib.vistos = vistos
-    return lib
+    yield lib
+    lib.close()
 
 
 def test_registrar_y_flujo(libreta):
@@ -67,3 +68,17 @@ def test_lote_usa_tienda_nueva(libreta):
     assert salida.decode("utf-8-sig").splitlines()[1] == "X1,venta,pan,10,3.00,NO"
     assert flujo["flujo"] == 3.0
     assert libreta.transacciones("t", "all") == []
+
+
+def test_legacy_path_ignored_and_week_persists(tmp_path):
+    path = tmp_path / "ledger.db"
+    memoria = Memoria(path)
+    lib = servicio.Libreta(memoria, str(tmp_path / "ignored.db"))
+    lib._fechar("t", "m")
+    assert not (tmp_path / "ignored.db").exists()
+    lib.close()
+    memoria = Memoria(path)
+    assert memoria.semanas_mensaje("t") == {"m": servicio.semana_actual()}
+    memoria.borrar_tienda("t")
+    assert memoria.semanas_mensaje("t") == {}
+    memoria.close()

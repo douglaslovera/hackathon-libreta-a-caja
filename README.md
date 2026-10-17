@@ -12,7 +12,8 @@ Python 3.12:
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
-# Edita .env: OPENAI_API_KEY, API_KEY y DB_PATH=./libreta.db.
+# Edita .env: OPENAI_API_KEY y API_KEY.
+# Local sin Postgres: deja DATABASE_URL vacío y DB_PATH=./libreta.db.
 # TELEGRAM_TOKEN es opcional; omítelo para ejecutar solo la API.
 .venv/bin/python main.py
 ```
@@ -28,16 +29,17 @@ adjuntarlo con la leyenda `/lote` o responder al documento con ese comando.
 Devuelve `entrega.csv` en una libreta separada del chat.
 
 ```sh
-# Lote local (requiere OPENAI_API_KEY)
+# Lote local (requiere OPENAI_API_KEY; SQLite en memoria, incluso con DATABASE_URL)
 .venv/bin/python -m canales.lote entrada.csv salida.csv
-# Evaluación
+# Persistir el lote: añade --db lote.db o --db postgresql://...
+# Evaluación (siempre SQLite en memoria)
 .venv/bin/python -m eval.evaluar
 # Pruebas del canal, sin red ni claves
 .venv/bin/pytest tests/test_voz.py tests/test_telegram.py
 ```
 
 Telegram conserva los chats y la semana de recepción de los mensajes en tablas auxiliares
-del mismo SQLite. Los reportes usan lunes a domingo, America/Lima, y el resumen automático
+del mismo backend de Memoria (Postgres o SQLite). Los reportes usan lunes a domingo, America/Lima, y el resumen automático
 se envía los domingos a las 20:00. Los movimientos antiguos sin metadatos de semana se
 consideran de la semana actual: el contrato de transacciones solo guarda el día, no la fecha.
 La cuota incluye semanas vacías entre la primera registrada y la actual; es una orientación,
@@ -45,7 +47,7 @@ no una aprobación de crédito. Las correcciones conservan la semana del movimie
 
 ## HTTP API
 
-La API y Telegram comparten una instancia de `Libreta` y el mismo SQLite. Para ejecutar
+La API y Telegram comparten una instancia de `Libreta` y el mismo backend de datos. Para ejecutar
 solo la API (sin iniciar polling de Telegram):
 
 ```sh
@@ -111,17 +113,39 @@ El navegador llama a `/api/summary`; el servidor de Next.js añade la clave.
 ## Railway
 
 1. Crea un servicio desde este repositorio; Railway usará el `Dockerfile`.
-2. Agrega un **Volume** montado en `/data`.
+2. Crea un proyecto Supabase en la misma región que Railway. En **Connect**, copia la
+   cadena **Session pooler** (compatible con IPv4) y configúrala como `DATABASE_URL`:
+   `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+   Usa el usuario postgres y codifica los caracteres especiales de la contraseña en la URL.
+   Con `DATABASE_URL` configurada, Railway **no necesita Volume**.
 3. Configura `OPENAI_API_KEY`, `API_KEY`, `OPENAI_MODEL=gpt-6-luna`,
-   `OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe` y `DB_PATH=/data/libreta.db`.
+   `OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe` y `DATABASE_URL`.
    Añade `TELEGRAM_TOKEN` si usarás el bot. Mantén `ALLOW_NO_AUTH=0`.
 4. Configura `CORS_ORIGINS=https://your-app.vercel.app,http://localhost:3000`
    con tus orígenes reales, separados por comas.
 5. Habilita un **dominio público** para que Next.js acceda a la API y configura
    `LIBRETA_API_URL` en Vercel con esa URL. Railway suministra `PORT`.
-6. Mantén **1 réplica**, por SQLite y el polling de Telegram. El healthcheck
+6. Mantén **1 réplica** por el polling de Telegram. El healthcheck
    configurado en `railway.json` consulta `/health`.
 
 Dos instancias con el mismo token causan **Telegram 409 Conflict**. Detén el bot local
-antes de usar Railway y evita que dos despliegues se solapen. El Volume mantiene la libreta
+antes de usar Railway y evita que dos despliegues se solapen. Supabase mantiene la libreta
 entre reinicios. La dependencia `python-telegram-bot[job-queue]` habilita el resumen semanal.
+
+
+El esquema se aplica automáticamente al abrir Postgres; también puedes pegar
+[`db/schema.sql`](db/schema.sql) en el SQL editor de Supabase. Las siete tablas usan el
+prefijo `public.libreta_`, con RLS habilitado **sin políticas**: la clave anon de PostgREST
+no puede acceder a los datos. El backend conecta como postgres y evita RLS.
+No requiere extensiones como `unaccent`. La conexión usa psycopg 3 y un pool de 1–5
+conexiones con sentencias preparadas deshabilitadas, compatible también con PgBouncer.
+
+`abrir_memoria(url)` elige Postgres si la URL empieza con `postgres://` o `postgresql://`.
+Sin argumento usa `DATABASE_URL`, luego `DB_PATH`, luego `./libreta.db`. Un path explícito
+elige SQLite; `Memoria` sigue siendo un alias de `MemoriaSQLite`.
+Para el fallback SQLite en Railway, deja `DATABASE_URL` vacío y configura un Volume en
+`/data` con `DB_PATH=/data/libreta.db`. Cambiar de backend no migra los registros existentes.
+
+Pruebas offline: `.venv/bin/pytest -q`. Para ejecutar también el contrato compartido de
+Postgres, configura `TEST_DATABASE_URL` hacia una base de pruebas; se aplica el esquema,
+se usan tiendas únicas y se limpian sus filas al terminar. Sin esa variable se omiten.

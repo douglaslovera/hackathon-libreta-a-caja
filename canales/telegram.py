@@ -5,8 +5,6 @@ import asyncio
 from datetime import time
 from io import BytesIO
 import logging
-import os
-import sqlite3
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -16,41 +14,19 @@ LOG = logging.getLogger(__name__)
 LIMA = ZoneInfo("America/Lima")
 
 
-class RegistroTelegram:
-    """Chats que reciben el resumen dominical; el negocio vive en Libreta."""
-
-    def __init__(self, path):
-        # A persistent connection also supports :memory: in tests. Serialize access
-        # with short synchronous queries in the event loop; no network work here.
-        self.db = sqlite3.connect(path)
-        self.db.execute("PRAGMA busy_timeout=5000")
-        self.db.execute("CREATE TABLE IF NOT EXISTS telegram_chats (chat_id INTEGER PRIMARY KEY)")
-        self.db.commit()
-
-    def recordar(self, chat_id):
-        self.db.execute("INSERT OR IGNORE INTO telegram_chats VALUES (?)", (chat_id,))
-        self.db.commit()
-
-    def chats(self):
-        return [fila[0] for fila in self.db.execute("SELECT chat_id FROM telegram_chats")]
-
-    def close(self):
-        self.db.close()
-
-
 def _libreta(context):
     return context.application.bot_data["libreta"]
 
 
 def _registro(context):
-    return context.application.bot_data.get("registro_telegram")
+    return _libreta(context).memoria
 
 
-def _tienda(update, context):
+async def _tienda(update, context):
     chat_id = update.effective_chat.id
     registro = _registro(context)
     if registro:
-        registro.recordar(chat_id)
+        await asyncio.to_thread(registro.recordar_chat, chat_id)
     return f"tg:{chat_id}"
 
 
@@ -78,7 +54,7 @@ async def _responder_resultado(update, context, tienda_id, resultado):
 
 
 async def texto(update: Update, context):
-    tienda_id = _tienda(update, context)
+    tienda_id = await _tienda(update, context)
     resultado = await asyncio.to_thread(
         _libreta(context).registrar, update.effective_message.text,
         tienda_id=tienda_id, id_mensaje=f"tg-{update.effective_message.message_id}",
@@ -87,7 +63,7 @@ async def texto(update: Update, context):
 
 
 async def audio(update: Update, context):
-    tienda_id = _tienda(update, context)
+    tienda_id = await _tienda(update, context)
     mensaje = update.effective_message
     nota = mensaje.voice or mensaje.audio
     archivo = await nota.get_file()
@@ -105,7 +81,7 @@ async def audio(update: Update, context):
 
 
 async def inicio(update: Update, context):
-    _tienda(update, context)
+    await _tienda(update, context)
     await update.effective_message.reply_text(
         "¡Hola, casera! Soy tu libreta 📒 Mándame texto o una nota de voz.\n"
         "Por ejemplo: ‘Vendí 3 leches a 4 soles’ o ‘Le fié 2 panes a Rosa por 1 sol’.\n"
@@ -113,18 +89,18 @@ async def inicio(update: Update, context):
 
 
 async def flujo(update: Update, context):
-    tienda_id = _tienda(update, context)
+    tienda_id = await _tienda(update, context)
     datos = await asyncio.to_thread(_libreta(context).flujo, tienda_id)
     await update.effective_message.reply_text(_formato_flujo(datos))
 
 
 async def cuota(update: Update, context):
-    datos = await asyncio.to_thread(_libreta(context).cuota, _tienda(update, context))
+    datos = await asyncio.to_thread(_libreta(context).cuota, await _tienda(update, context))
     await _responder(update, f"🏦 Cuota mensual orientativa: S/ {datos['cuota']:.2f}\n{datos['explicacion']}")
 
 
 async def resumen(update: Update, context):
-    filas = await asyncio.to_thread(_libreta(context).transacciones, _tienda(update, context))
+    filas = await asyncio.to_thread(_libreta(context).transacciones, await _tienda(update, context))
     lineas = ["📒 Movimientos de esta semana"]
     for t in filas:
         monto = "por confirmar" if t.monto is None else f"S/ {t.monto:.2f}"
@@ -133,7 +109,7 @@ async def resumen(update: Update, context):
 
 
 async def deudas(update: Update, context):
-    filas = await asyncio.to_thread(_libreta(context).deudas, _tienda(update, context))
+    filas = await asyncio.to_thread(_libreta(context).deudas, await _tienda(update, context))
     lineas = ["📝 Fiados pendientes"]
     for d in filas:
         monto = "monto por confirmar" if d.pendiente is None else f"S/ {d.pendiente:.2f}"
@@ -142,7 +118,7 @@ async def deudas(update: Update, context):
 
 
 async def reiniciar(update: Update, context):
-    _tienda(update, context)
+    await _tienda(update, context)
     await update.effective_message.reply_text(
         "¿Borramos todos los movimientos y fiados de esta libreta? No se puede deshacer.",
         reply_markup=InlineKeyboardMarkup([[
@@ -153,7 +129,7 @@ async def reiniciar(update: Update, context):
 
 
 async def boton(update: Update, context):
-    tienda_id = _tienda(update, context)
+    tienda_id = await _tienda(update, context)
     query = update.callback_query
     await query.answer()
     if query.data.startswith("omitir:"):
@@ -174,7 +150,7 @@ async def boton(update: Update, context):
 
 
 async def lote(update: Update, context):
-    _tienda(update, context)
+    await _tienda(update, context)
     mensaje = update.effective_message
     documento = mensaje.document
     if documento is None and mensaje.reply_to_message:
@@ -187,7 +163,7 @@ async def lote(update: Update, context):
 
 
 async def documento(update: Update, context):
-    _tienda(update, context)
+    await _tienda(update, context)
     caption = update.effective_message.caption or ""
     comando = caption.split(maxsplit=1)[0].split("@")[0] if caption else ""
     if context.chat_data.get("esperando_csv") or comando == "/lote":
@@ -213,7 +189,8 @@ async def _ejecutar_lote(update, context, documento):
 
 async def resumen_semanal(context):
     registro = _registro(context)
-    for chat_id in registro.chats() if registro else []:
+    chats = await asyncio.to_thread(registro.chats) if registro else []
+    for chat_id in chats:
         try:
             datos = await asyncio.to_thread(_libreta(context).flujo, f"tg:{chat_id}")
             await context.bot.send_message(chat_id=chat_id, text=_formato_flujo(datos))
@@ -231,13 +208,8 @@ async def error(update, context):
 
 
 def crear_aplicacion(token, libreta, *, db_path=None) -> Application:
-    registro = RegistroTelegram(db_path or os.getenv("DB_PATH", "./libreta.db"))
-
-    async def cerrar(application):
-        registro.close()
-
-    app = Application.builder().token(token).post_shutdown(cerrar).build()
-    app.bot_data.update(libreta=libreta, registro_telegram=registro)
+    app = Application.builder().token(token).build()
+    app.bot_data.update(libreta=libreta)
     for nombre, handler in {"start": inicio, "flujo": flujo, "cuota": cuota, "resumen": resumen,
                             "deudas": deudas, "reiniciar": reiniciar, "lote": lote}.items():
         app.add_handler(CommandHandler(nombre, handler))
@@ -247,7 +219,6 @@ def crear_aplicacion(token, libreta, *, db_path=None) -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, texto))
     app.add_error_handler(error)
     if app.job_queue is None:
-        registro.close()
         raise RuntimeError("Instala python-telegram-bot[job-queue] para el resumen semanal")
     # PTB uses Sunday=0, Monday=1, ... Saturday=6.
     app.job_queue.run_daily(resumen_semanal, time=time(20, 0, tzinfo=LIMA), days=(0,), name="resumen-domingo")

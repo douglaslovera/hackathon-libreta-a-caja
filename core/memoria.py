@@ -1,6 +1,7 @@
 """Thread-safe SQLite ledger. All public operations serialize on one connection."""
 from dataclasses import asdict
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -8,7 +9,7 @@ import threading
 from core.modelos import Contexto, Deuda, Resultado, Transaccion
 
 
-class Memoria:
+class MemoriaSQLite:
     def __init__(self, path: str = ":memory:") -> None:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
@@ -35,6 +36,16 @@ class Memoria:
                 texto TEXT, salida_llm TEXT, resultado TEXT,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
+        self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS semanas_mensaje (
+                tienda_id TEXT, id_mensaje TEXT, semana TEXT NOT NULL,
+                PRIMARY KEY(tienda_id, id_mensaje));
+            CREATE TABLE IF NOT EXISTS telegram_chats (chat_id INTEGER PRIMARY KEY);
+        """)
+        # Carry the old bot's dates over once, then remove the obsolete source.
+        if self._db.execute("SELECT 1 FROM sqlite_master WHERE name='telegram_semanas'").fetchone():
+            self._db.execute("INSERT OR IGNORE INTO semanas_mensaje SELECT tienda_id,id_mensaje,semana FROM telegram_semanas")
+            self._db.execute("DROP TABLE telegram_semanas")
         try:
             self._db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS transacciones_fts USING fts5(producto, cliente, tokenize='unicode61 remove_diacritics 2')")
             # Rebuild on opening, including ledgers created without FTS support.
@@ -171,8 +182,44 @@ class Memoria:
             if self._fts:
                 self._db.execute('DELETE FROM transacciones_fts WHERE rowid IN (SELECT id FROM transacciones WHERE tienda_id=?)', (tienda_id,))
             self._db.execute('DELETE FROM deudas WHERE transaccion_id IN (SELECT id FROM transacciones WHERE tienda_id=?)', (tienda_id,))
-            for table in ('transacciones', 'alias', 'pendientes', 'log'):
+            for table in ('transacciones', 'alias', 'pendientes', 'log', 'semanas_mensaje'):
                 self._db.execute(f'DELETE FROM {table} WHERE tienda_id=?', (tienda_id,))
 
     def contexto(self, tienda_id: str, dia: str | None = None) -> Contexto:
         return Contexto(dia=dia, deudas_abiertas=self.deudas_abiertas(tienda_id), ultimas=self.ultimas(tienda_id), alias=self.alias(tienda_id))
+
+    def fechar_semana(self, tienda_id: str, id_mensaje: str, semana: str) -> None:
+        with self._lock, self._db:
+            self._db.execute('INSERT OR IGNORE INTO semanas_mensaje VALUES (?,?,?)', (tienda_id, id_mensaje, semana))
+
+    def semanas_mensaje(self, tienda_id: str) -> dict[str, str]:
+        with self._lock:
+            return dict(self._db.execute('SELECT id_mensaje,semana FROM semanas_mensaje WHERE tienda_id=?', (tienda_id,)))
+
+    def recordar_chat(self, chat_id: int) -> None:
+        with self._lock, self._db:
+            self._db.execute('INSERT OR IGNORE INTO telegram_chats VALUES (?)', (chat_id,))
+
+    def chats(self) -> list[int]:
+        with self._lock:
+            return [r[0] for r in self._db.execute('SELECT chat_id FROM telegram_chats ORDER BY chat_id')]
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+
+Memoria = MemoriaSQLite
+
+
+def abrir_memoria(url: str | None = None):
+    destino = url or os.getenv('DATABASE_URL') or os.getenv('DB_PATH') or './libreta.db'
+    if destino.startswith(('postgres://', 'postgresql://')):
+        from core.memoria_pg import MemoriaPostgres
+        return MemoriaPostgres(destino)
+    if '://' in destino:
+        # Never fall back to a SQLite file named after a URL: data would silently vanish on redeploy.
+        raise ValueError(
+            'DATABASE_URL debe ser una cadena de conexión Postgres (postgresql://...), p. ej. el '
+            '"Session pooler" de Supabase; la URL https://<ref>.supabase.co es la de la API REST.')
+    return MemoriaSQLite(destino)

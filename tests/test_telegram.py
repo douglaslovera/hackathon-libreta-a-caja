@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, Mock, call
 import pytest
 
 from canales import telegram as tg
+from core.memoria import Memoria
 from core.modelos import Deuda, Resultado, Transaccion
 
 
 @pytest.fixture
 def entorno():
     libreta = SimpleNamespace(
+        memoria=Memoria(),
         registrar=Mock(return_value=Resultado(respuesta="Anotado 📒")),
         registrar_audio=Mock(return_value=("Vendí una leche", Resultado(respuesta="Anotado"))),
         pendiente=Mock(return_value=None), omitir_pendiente=Mock(return_value=True),
@@ -207,25 +209,24 @@ def test_lote_solicita_csv_y_rechaza_otro_formato(entorno):
 
 def test_registro_solo_persiste_chats(tmp_path):
     path = str(tmp_path / "libreta.db")
-    registro = tg.RegistroTelegram(path)
-    registro.recordar(123)
-    registro.recordar(123)
+    registro = Memoria(path)
+    registro.recordar_chat(123)
+    registro.recordar_chat(123)
     registro.close()
-    registro = tg.RegistroTelegram(path)
+    registro = Memoria(path)
     try:
         assert registro.chats() == [123]
-        assert registro.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("telegram_chats",)]
+        assert registro.transacciones("tg:123") == []
     finally:
         registro.close()
 
 
 def test_resumen_programado_usa_chats_y_continua_tras_error(entorno, tmp_path):
     update, context, libreta = entorno
-    registro = tg.RegistroTelegram(str(tmp_path / "libreta.db"))
-    context.application.bot_data["registro_telegram"] = registro
+    registro = libreta.memoria
     try:
         asyncio.run(tg.inicio(update, context))
-        registro.recordar(456)
+        registro.recordar_chat(456)
         context.bot.send_message.side_effect = [RuntimeError("chat bloqueado"), None]
         asyncio.run(tg.resumen_semanal(context))
         assert libreta.flujo.call_args_list == [call("tg:123"), call("tg:456")]
@@ -239,7 +240,7 @@ def test_resumen_programado_usa_chats_y_continua_tras_error(entorno, tmp_path):
 
 def test_aplicacion_guarda_libreta_y_programa_domingo_lima(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "libreta.db"))
-    libreta = object()
+    libreta = SimpleNamespace(memoria=Memoria())
     app = tg.crear_aplicacion("123:ABC", libreta)
     try:
         assert app.bot_data["libreta"] is libreta
@@ -247,10 +248,8 @@ def test_aplicacion_guarda_libreta_y_programa_domingo_lima(tmp_path, monkeypatch
         assert str(trigger.timezone) == "America/Lima"
         assert "day_of_week='sun'" in str(trigger)
         assert "hour='20'" in str(trigger)
-        asyncio.run(app.post_shutdown(app))
-    except BaseException:
-        app.bot_data["registro_telegram"].close()
-        raise
+    finally:
+        libreta.memoria.close()
 
 
 def test_error_global_avisa(entorno):

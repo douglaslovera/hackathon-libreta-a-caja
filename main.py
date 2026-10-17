@@ -7,21 +7,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from canales.api import create_app
-from core.memoria import Memoria
+from core.memoria import abrir_memoria
 from core.servicio import Libreta
 
 
 def build_app(env=None, *, no_telegram=False):
-    """Build without starting network clients; explicit env mappings make startup testable."""
+    """Build storage and the app without starting Telegram polling; env mappings are injectable."""
     env = os.environ if env is None else env
     api_key = env.get('API_KEY', '').strip()
     if not api_key and env.get('ALLOW_NO_AUTH') != '1':
         raise ValueError('Falta API_KEY. Configura API_KEY o ALLOW_NO_AUTH=1 para desarrollo local.')
     logging.getLogger('httpx').setLevel(logging.WARNING)
-    db_path = env.get('DB_PATH') or './libreta.db'
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    memoria = Memoria(db_path)
-    libreta = Libreta(memoria, db_path)
+    destino = env.get('DATABASE_URL') or env.get('DB_PATH') or './libreta.db'
+    if not destino.startswith(('postgres://', 'postgresql://')):
+        Path(destino).parent.mkdir(parents=True, exist_ok=True)
+    memoria = abrir_memoria(destino)
+    libreta = Libreta(memoria)
     app = create_app(libreta, api_key=api_key or None,
                      cors_origins=[s.strip() for s in env.get('CORS_ORIGINS', '').split(',') if s.strip()])
     original_lifespan = app.router.lifespan_context
@@ -52,8 +53,6 @@ def build_app(env=None, *, no_telegram=False):
                     yield
         finally:
             await asyncio.to_thread(libreta.close)
-            # Memoria currently exposes no public close method.
-            await asyncio.to_thread(memoria._db.close)
 
     app.router.lifespan_context = lifespan
     app.state.libreta = libreta

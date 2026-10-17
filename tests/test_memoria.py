@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor
 import json
 import pytest
 from core.memoria import Memoria
@@ -27,73 +26,86 @@ def test_persistence_wal_and_context(tmp_path):
     assert other.ultimas('a',0) == []
     other.fijar_pendiente('a',None)
     assert other.pendiente('a') is None
+    other.close()
+    m.close()
 
 
-def test_debt_lifecycle_correction_and_isolation():
-    m = Memoria()
-    t = m.agregar(transaction(tipo='fiado',monto=20,cliente='Rosa',cantidad=2))
-    m.registrar_cobro('a',t.id,5)
-    assert m.deudas_abiertas('a')[0].pendiente == 15
-    m.actualizar(t.id,monto=25,producto='arroz')
-    debt = m.deudas_abiertas('a')[0]
-    assert (debt.monto_original,debt.pendiente,debt.producto) == (25,20,'arroz')
-    with pytest.raises(ValueError):
-        m.registrar_cobro('b',t.id,5)
-    with pytest.raises(ValueError):
-        m.registrar_cobro('a',t.id,-1)
-    m.registrar_cobro('a',t.id,None)
-    assert m.deudas_abiertas('a') == []
-    t2 = m.agregar(transaction(tipo='fiado',cliente='Pepe'))
-    m.registrar_cobro('a',t2.id,10)
-    assert m.deudas_abiertas('a')[0].pendiente is None
-    m.actualizar(t2.id,monto=30)
-    assert m.deudas_abiertas('a')[0].pendiente == 30
-    m.actualizar(t2.id,tipo='venta')
-    assert not m.deudas_abiertas('a')
-    m.actualizar(t2.id,tipo='fiado')
-    assert m.deudas_abiertas('a')[0].pendiente == 30
 
 
-@pytest.mark.parametrize('fts',[True,False])
-def test_search_and_delete(fts):
-    m = Memoria()
-    if fts and not m._fts:
-        pytest.skip('SQLite sin FTS5')
-    m._fts = fts
-    t = m.agregar(transaction(tipo='fiado', producto='aceite primor',cliente='Rosa',monto=11))
-    other = m.agregar(transaction('b',producto='aceite primor'))
-    assert [r.id for r in m.buscar('a','aceite')] == [t.id]
-    assert [r.id for r in m.buscar('a','Rosa')] == [t.id]
-    assert m.buscar('a','" *') == []
-    m.actualizar(t.id,producto='leche')
-    assert m.buscar('a','aceite') == []
-    m.guardar_alias('a','lech','leche')
-    m.fijar_pendiente('a', {'pregunta':'¿Monto?'})
-    m.log('a','m','texto','[]',Resultado(transacciones=[t]))
-    assert json.loads(m._db.execute('SELECT resultado FROM log').fetchone()[0])['transacciones'][0]['id'] == t.id
-    m.borrar_tienda('a')
-    assert not m.transacciones('a') and not m.deudas_abiertas('a')
-    assert not m.buscar('a','leche') and not m.alias('a') and m.pendiente('a') is None
-    assert m._db.execute('SELECT count(*) FROM log').fetchone()[0] == 0
-    assert m.obtener(other.id) is not None
+from tests.memoria_contract import ComportamientoMemoria
 
 
-def test_threads_and_invalid_updates():
-    m = Memoria()
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        list(pool.map(lambda i: m.agregar(transaction(monto=i)), range(80)))
-    assert len(m.transacciones('a')) == 80
-    assert len({t.id for t in m.transacciones('a')}) == 80
-    with pytest.raises(ValueError):
-        m.actualizar(999,monto=1)
-    with pytest.raises(ValueError):
-        m.actualizar(1,tienda_id='b')
-    assert m.obtener(999) is None
+class TestMemoriaSQLite(ComportamientoMemoria):
+    @pytest.fixture(params=[True, False], ids=['fts', 'like'])
+    def m(self, request, tiendas):
+        memoria = Memoria()
+        if request.param and not memoria._fts:
+            memoria.close()
+            pytest.skip('SQLite sin FTS5')
+        memoria._fts = request.param
+        yield memoria
+        memoria.close()
 
 
-def test_created_metadata_survives_roundtrip():
+def test_log_serialization_and_delete():
     m = Memoria()
     t = m.agregar(transaction())
-    assert t.created_at
-    assert m.obtener(t.id).created_at == t.created_at
-    assert m.transacciones('a')[0].created_at == t.created_at
+    m.log('a', 'm', 'texto', '[]', Resultado(transacciones=[t]))
+    assert json.loads(m._db.execute('SELECT resultado FROM log').fetchone()[0])['transacciones'][0]['id'] == t.id
+    m.borrar_tienda('a')
+    assert m._db.execute('SELECT count(*) FROM log').fetchone()[0] == 0
+    m.close()
+
+
+def test_old_telegram_weeks_migrate_once(tmp_path):
+    import sqlite3
+    path = tmp_path / 'legacy.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE telegram_semanas (tienda_id TEXT, id_mensaje TEXT, semana TEXT)')
+        db.execute("INSERT INTO telegram_semanas VALUES ('a', 'm', '2026-10-05')")
+    m = Memoria(path)
+    assert m.semanas_mensaje('a') == {'m': '2026-10-05'}
+    m.borrar_tienda('a')
+    m.close()
+    m = Memoria(path)
+    assert m.semanas_mensaje('a') == {}
+    m.close()
+
+
+@pytest.mark.parametrize('url', ['postgres://example', 'postgresql://example'])
+def test_factory_postgres_dispatch(url, monkeypatch):
+    import core.memoria_pg
+    from core.memoria import abrir_memoria
+    calls = []
+    marker = object()
+    monkeypatch.setattr(core.memoria_pg, 'MemoriaPostgres', lambda dsn: calls.append(dsn) or marker)
+    assert abrir_memoria(url) is marker
+    monkeypatch.setenv('DATABASE_URL', url)
+    assert abrir_memoria() is marker
+    assert calls == [url, url]
+    # Explicit in-memory requests always beat production DATABASE_URL.
+    m = abrir_memoria(':memory:')
+    assert isinstance(m, Memoria)
+    m.close()
+
+
+def test_factory_sqlite_paths(tmp_path, monkeypatch):
+    from core.memoria import abrir_memoria
+    monkeypatch.delenv('DATABASE_URL', raising=False)
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'fallback.db'))
+    m = abrir_memoria()
+    m.close()
+    assert (tmp_path / 'fallback.db').exists()
+    monkeypatch.delenv('DB_PATH')
+    monkeypatch.chdir(tmp_path)
+    m = abrir_memoria()
+    m.close()
+    assert (tmp_path / 'libreta.db').exists()
+
+
+def test_abrir_memoria_rechaza_url_no_postgres():
+    import pytest
+    from core.memoria import abrir_memoria
+
+    with pytest.raises(ValueError, match="Session pooler"):
+        abrir_memoria("https://abc.supabase.co")
