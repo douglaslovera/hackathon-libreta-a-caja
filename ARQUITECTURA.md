@@ -116,3 +116,46 @@ def procesar_mensaje(texto: str, *, tienda_id: str, id_mensaje: str, dia: str | 
 ## CSV output
 Columns exactly `id_mensaje,tipo,producto,cantidad,monto,requiere_confirmacion`; monto with 2 decimals or
 empty; cantidad integer when whole; SI/NO. Generated from the final DB state so corrections apply.
+
+## Application service (`core/servicio.py`) — shared by every channel
+`Libreta(memoria, db_path=None, *, interpretar=None)` owns follow-up answers, week dating, reports and batch:
+`registrar(texto, *, tienda_id, id_mensaje=None, dia=None) -> Resultado` (an open pending question turns the
+text into its answer), `registrar_audio(audio, nombre_archivo, *, tienda_id) -> (transcript, Resultado|None)`,
+`transcribir(...)`, `pendiente(tienda_id)`, `omitir_pendiente(tienda_id, transaccion_id=None) -> bool`,
+`transacciones(tienda_id, semana=None|"YYYY-MM-DD"|"all")`, `semanas(tienda_id)`, `flujo(tienda_id, semana=None)`,
+`cuota(tienda_id)` (adds `semanas: [{semana, flujo}]`), `deudas(tienda_id)`, `reiniciar(tienda_id)`,
+`lote(csv_bytes, *, prefijo) -> (csv_bytes, filas, flujo)`, `close()`.
+All methods are blocking (SQLite/OpenAI): async callers wrap them in `asyncio.to_thread`.
+Channels must not reimplement this logic. Telegram: `crear_aplicacion(token, libreta) -> Application`.
+
+## HTTP API (`canales/api.py`, FastAPI) — for the Vercel frontend
+English paths and JSON keys; domain *values* stay Spanish (`type`: venta|gasto|fiado|cobro_fiado).
+`create_app(libreta, *, api_key=None, cors_origins=()) -> FastAPI`.
+
+Auth: every route except `GET /health` requires `Authorization: Bearer <API_KEY>` (env `API_KEY`; if unset the
+API refuses to start unless `ALLOW_NO_AUTH=1`, for local dev). The Next.js app calls it from server routes, so the
+key never reaches the browser. CORS origins from env `CORS_ORIGINS` (comma-separated).
+`shop_id` is the tienda_id; `tg:<chat_id>` addresses the same notebook as that Telegram chat.
+
+| Method & path | Body | Returns |
+|---|---|---|
+| `GET /health` | — | `{"status":"ok"}` |
+| `POST /shops/{shop_id}/audio` | multipart `file` (webm/ogg/m4a/mp3/wav, ≤ 10 MB) | `{"transcript", "result": Result}`; 422 `{"detail":"no_speech"}` if nothing heard |
+| `GET /shops/{shop_id}/pending` | — | `{"pending": {"transaction_id", "question"} \| null}` |
+| `POST /shops/{shop_id}/pending/answer` | `{"text"}` | `Result`; 409 if nothing pending |
+| `DELETE /shops/{shop_id}/pending` | — | `{"skipped": bool}` |
+| `GET /shops/{shop_id}/transactions?week=YYYY-MM-DD\|all` | — | `{"week", "transactions": [Transaction]}` (default: current week) |
+| `GET /shops/{shop_id}/debts` | — | `{"debts": [Debt]}` |
+| `GET /shops/{shop_id}/cash-flow?week=` | — | `{"week","sales","collections","expenses","net_cash_flow","outstanding_credit","missing_amounts"}` |
+| `GET /shops/{shop_id}/loan-estimate` | — | `{"avg_weekly_cash_flow","monthly_cash_flow","monthly_payment","percentage","explanation","weeks":[{"week","net_cash_flow"}]}` |
+| `GET /shops/{shop_id}/summary` | — | `{"cash_flow", "loan_estimate", "debts", "pending", "transactions"}` (one call for the dashboard) |
+| `POST /shops/{shop_id}/batch` | multipart `file` (.csv `id_mensaje,dia,mensaje`) | `text/csv` attachment `entrega.csv`; headers `X-Rows`, `X-Needs-Confirmation`, `X-Net-Cash-Flow` |
+| `DELETE /shops/{shop_id}` | — | `{"reset": true}` |
+
+Schemas: `Transaction {id, message_id, type, product, quantity, amount|null, needs_confirmation, day, customer, question}`;
+`Debt {transaction_id, customer, product, original_amount|null, outstanding|null}`;
+`Result {transactions:[Transaction], corrected:[Transaction], questions:[str], rejected:[str], ignored:[str], reply}`.
+
+Runtime: one process. `main.py` runs uvicorn on `$PORT` (default 8000) serving the API, and — when
+`TELEGRAM_TOKEN` is set — starts the Telegram bot's polling inside the same event loop (FastAPI lifespan),
+sharing one `Libreta`. Railway: one service, Volume at `/data`, public domain enabled, 1 replica.
