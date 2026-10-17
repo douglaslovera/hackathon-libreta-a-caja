@@ -6,4 +6,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY core ./core
 COPY canales ./canales
 COPY main.py .
+EXPOSE 8000
 CMD ["python", "main.py"]
