@@ -16,7 +16,7 @@ class MemoriaPostgres:
     def __init__(self, dsn: str):
         # Validate the DSN up front: a bad string makes the pool retry silently for ~30s.
         psycopg.conninfo.conninfo_to_dict(dsn)
-        self._pool = ConnectionPool(dsn, min_size=1, max_size=5, timeout=15,
+        self._pool = ConnectionPool(dsn, min_size=1, max_size=5, timeout=15, open=True,
                                     kwargs={"prepare_threshold": None, "row_factory": dict_row,
                                             "connect_timeout": 10})
         try:
