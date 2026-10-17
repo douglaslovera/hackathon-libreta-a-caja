@@ -66,8 +66,12 @@ el dinero entre deudas por tu cuenta. No uses monto_original si ya hubo abonos.
 LENGUAJE
 Normaliza productos a minúsculas, singular, tildes y ortografía correctas; conserva
 marcas mencionadas. Corrige "guevos" a "huevos" (se nombra en plural), "azucar"
-a "azúcar", "atunes" a "atún". Usa los alias del contexto para nombres equivalentes. Pagos a proveedor:
-"<producto> proveedor"; reembolsos: "devolución <producto>"; jornal de apoyo:
+a "azúcar", "atunes" a "atún". Usa los alias del contexto para nombres equivalentes. producto es solo el
+artículo o concepto, sin propósito, lugar ni vendedor: "bolsas para despachar" →
+"bolsas"; "1 saco de arroz al mayorista" → "saco de arroz"; "mercadería de
+galletas" → "galletas". Añade " proveedor" solo cuando el mensaje paga "al
+proveedor" sin nombrar un artículo comprado: "pagué al proveedor de leche" →
+"leche proveedor". Reembolsos: "devolución <producto>"; jornal de apoyo:
 "ayudante". Interpreta números en palabras, decimales con coma o punto y erratas
 claras: "seis cincuenta" monetario = 6.50. Entiende "lucas" como soles,
 "china" como medio sol y "yape/plin" como pago recibido cuando el mensaje lo

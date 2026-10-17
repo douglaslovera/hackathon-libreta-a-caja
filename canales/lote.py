@@ -75,6 +75,9 @@ def procesar_csv(
 
 
 def main(argv: list[str] | None = None) -> None:
+    from core.config import cargar_env
+
+    cargar_env()
     from core.memoria import Memoria
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

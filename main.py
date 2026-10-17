@@ -5,6 +5,9 @@ from pathlib import Path
 
 
 def main():
+    from core.config import cargar_env
+
+    cargar_env()
     token = os.getenv("TELEGRAM_TOKEN", "").strip()
     if not token:
         print("Falta TELEGRAM_TOKEN. Crea tu bot con @BotFather y exporta TELEGRAM_TOKEN antes de ejecutar python main.py.")

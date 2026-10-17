@@ -144,6 +144,9 @@ def evaluar(esperado: list[dict], obtenido: list[dict], *, detalle: bool = True)
 
 
 def main(argv: list[str] | None = None) -> None:
+    from core.config import cargar_env
+
+    cargar_env()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--salida", help="CSV to score; if omitted, run the pipeline on --mensajes first")
     p.add_argument("--mensajes", default=str(MENSAJES))
