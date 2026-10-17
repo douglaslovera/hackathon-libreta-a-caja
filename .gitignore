@@ -4,3 +4,5 @@ __pycache__/
 *.db-*
 .env
 salidas/
+Kit_Reto_Mibanco.zip
+Kit_Reto_Mibanco/*.docx
