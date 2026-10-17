@@ -52,6 +52,9 @@ class Libreta:
                    tienda_id TEXT, id_mensaje TEXT, semana TEXT NOT NULL,
                    PRIMARY KEY (tienda_id, id_mensaje))"""
         )
+        # One-time carry-over from the bot's earlier week table.
+        if self._db.execute("SELECT 1 FROM sqlite_master WHERE name='telegram_semanas'").fetchone():
+            self._db.execute("INSERT OR IGNORE INTO semanas_mensaje SELECT tienda_id, id_mensaje, semana FROM telegram_semanas")
         self._db.commit()
 
     # ---- recording -------------------------------------------------------------------------
